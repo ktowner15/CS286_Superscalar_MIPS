@@ -6,9 +6,19 @@
 #include <bitset>
 #include <fstream>
 #include <string>
+#include <list>
 using namespace std;
 
-/*BEGINNING OF DISASSEMBLER*/
+struct cacheSet{        //Cache will be an array of these structs
+        bitset<1> LRU = {0};
+        bitset<1> valid = {0};
+        bitset<1> dirty = {0};
+        bitset<32> tag = {00000000000000000000000000000000};                 //FIXME: how many bits long should the tag be?  If it's an int, should it be 32, or am I missing something?
+        bitset<32> block[1] = {00000000000000000000000000000000};
+};
+
+void printBuffers();
+string printCache(cacheSet cache[], int numberOfSets);
 string determineRegister(bitset<5> regAddress);
 int determineRegisterInt(bitset<5> regAddress);
 int convertImmToInt(string imm);
@@ -41,14 +51,23 @@ bitset<5> shamts[MAX_INSTRUCTION_COUNT];
 bitset<6> functs[MAX_INSTRUCTION_COUNT];
 bitset<16> immediates[MAX_INSTRUCTION_COUNT];
 bitset<26> addresses[MAX_INSTRUCTION_COUNT];
+string instructions[MAX_INSTRUCTION_COUNT];
 
 int dataValues[MAX_INSTRUCTION_COUNT];
 int dataStartingAddress = 0;
 int numberOfDataEntries = 0;
 
+cacheSet cache[7];
+list<bitset<32>> preIssueBuffer;
+list<bitset<32>> preALUQueue;
+list<bitset<32>> postALUQueue;
+list<bitset<32>> preMEMQueue;
+list<bitset<32>> postMEMQueue;
+
 
 int main(int argc, char* argv[])
 {       
+        /*BEGINNING OF DISASSEMBLER*/
         string filenameOut;
         string filenameSim;
 
@@ -59,7 +78,7 @@ int main(int argc, char* argv[])
         filenameOut = ss1.str();
         
 
-        ss2 << argv[4] << "_sim.txt";    //Sets simulation output filename
+        ss2 << argv[4] << "_pipeline.txt";    //Sets simulation output filename
         filenameSim = ss2.str();
         
 
@@ -201,8 +220,8 @@ int main(int argc, char* argv[])
 
                                                                         }
                                                                 break;
-                                                                case 2://SLR (checked + tested)
-                                                                        ofs << setw(6) << "SLR ";
+                                                                case 2://SRL (checked + tested)
+                                                                        ofs << setw(6) << "SRL ";
                                                                         //Format: rd, rt, sa
                                                                         ofs << determineRegister(rds[readCounter]) << ", "
                                                                             << determineRegister(rts[readCounter]) << ", "
@@ -349,7 +368,6 @@ int main(int argc, char* argv[])
         }
         ofs.close();
         dataValueIndex = 0;
-        
         /*This code tests if arrays store the 32bit bitsets correctly*/
         /*for(int a = 0; a < readCounter; a++){
                 cout << endl
@@ -422,10 +440,11 @@ int main(int argc, char* argv[])
         bitset<32> temp3Word;
         bitset<32> temp4Word;
         bitset<32> temp5Word;
+
+        cacheSet cache[4];
         
 
-
-        for(int loopCounter = 0; loopCounter < readCounter; loopCounter++){
+        for(int loopCounter = 0; loopCounter < readCounter &&  cycleCounter <= 50; loopCounter++){        //FIXME: remove the cycleCounter limit after branch dependencies are fixed
                 if(!ofs.is_open()){
                 cerr << "Failed to open simulation file, exiting & returning 1..." << endl;
                 exit(1);
@@ -441,8 +460,8 @@ int main(int argc, char* argv[])
                         }
                         if(validflags[loopCounter].to_ulong() == 1){    //If valid instruction, then translate.
 
-                                ofs << "====================" << endl
-                                    << "cycle:" << cycleCounter + 1 << " "
+                                ofs << "--------------------" << endl
+                                    << "Cycle:" << cycleCounter + 1 << " "
                                     << setw(4) << instructionAddresses[loopCounter];
                                 
 
@@ -475,8 +494,8 @@ int main(int argc, char* argv[])
 
                                                                 }
                                                         break;
-                                                        case 2://SLR (checked + tested) & DONE
-                                                                ofs << setw(6) << "SLR ";
+                                                        case 2://SRL (checked + tested) & DONE
+                                                                ofs << setw(6) << "SRL ";
                                                                 //Format: rd, rt, sa
                                                                 ofs << determineRegister(rds[loopCounter]) << ", "
                                                                         << determineRegister(rts[loopCounter]) << ", "
@@ -552,6 +571,15 @@ int main(int argc, char* argv[])
                                                 //Format: rs, offset
                                                 ofs << determineRegister(rss[loopCounter]) << ", "
                                                         << "#" << immediates[loopCounter].to_ulong() * 4;   // immediate is multiplied by 4 to give correct offset amount
+
+                                                //Operation: if rs < 0, then branch to instruction @ offset.
+                                                temp1 = registers[determineRegisterInt(rss[loopCounter]) < 0];  //temp 1 = value inside register rt
+                                                temp2 = immediates[loopCounter].to_ulong() * 4;                  //temp2 = integer value of offset (address to jump to)
+                                                //index * 4 = instr. address, so instr. address / 4 = index to jump to
+                                                temp3 = temp2 / 4;       //temp3 = index of command to jump to if condition is met
+                                                if(registers[determineRegisterInt(rss[loopCounter])] < 0){
+                                                        loopCounter = temp3;
+                                                }
                                         break;
                                         case 2://J (checked + tested)
                                                 ofs << setw(6) << "J ";
@@ -559,7 +587,7 @@ int main(int argc, char* argv[])
                                                 ofs << "#"
                                                         << addresses[loopCounter].to_ulong() * 4;
                                         break;
-                                        case 3://LW (checked + tested)
+                                        case 3://LW (checked + tested) & DONE
                                                 ofs << setw(6) << "LW ";
                                                 //Format: rt, offset(base)
                                                 ofs << determineRegister(rts[loopCounter]) << ", "
@@ -568,13 +596,13 @@ int main(int argc, char* argv[])
                                                 
                                                 //Operation:    rt = memory[base + offset]
                                                 temp1 = registers[determineRegisterInt(rss[cycleCounter])];//base
-                                                //should be 0
-                                                temp2 = (convertImmToInt(immediates[cycleCounter - 1].to_string()));//offset
-                                                //should be imm 10, stored at dataVals[23]
-                                                temp3 = determineRegisterInt(rts[cycleCounter]);//rt register index
-                                                //should be 1 (for register 1)
-
-                                                registers[temp3] = dataValues[temp1 + temp2];
+                                                temp2 = (convertImmToInt(immediates[cycleCounter].to_string()) - dataStartingAddress) / 4;//offset
+                                                //temp2 = (convertImmToInt(immediates[cycleCounter].to_string())) / 4;
+                                                temp3 = registers[determineRegisterInt(rts[cycleCounter])];//rt register index
+                                                temp4 = determineRegisterInt(rts[cycleCounter]);
+                                                temp3 = dataValues[temp1 + temp2];
+                                                registers[temp4] = temp3;
+                                                
                                                 //CONTINUE: Determine if this is working properly on cycle 3
                                         break;
                                         case 4://BEQ (not present)
@@ -600,7 +628,7 @@ int main(int argc, char* argv[])
 
 
                                         break;
-                                        case 11://SW (checked + tested)
+                                        case 11://SW (checked + tested) & DONE
                                                 ofs << setw(6) << "SW ";
                                                 //Format: rt, offset(base)
                                                 ofs << determineRegister(rts[loopCounter]) << ", "
@@ -627,10 +655,24 @@ int main(int argc, char* argv[])
                                         }
                                         
                                 }
-                                ofs << endl
-                                    << endl
-                                    << "registers: " << endl
-                                    << "r00:\t" 
+                                ofs << endl << endl << "Pre-Issue Buffer: " << endl
+                                            << "\tEntry 0: " << endl
+                                            << "\tEntry 1: " << endl
+                                            << "\tEntry 2: " << endl
+                                            << "\tEntry 3: " << endl
+                                            << "Pre_ALU Queue: " << endl
+                                            << "\tEntry 0: " << endl
+                                            << "\tEntry 1: " << endl
+                                            << "Post_ALU Queue: " << endl
+                                            << "\tEntry 0: " << endl
+                                            << "Pre_MEM Queue: " << endl
+                                            << "\tEntry 0: " << endl
+                                            << "\tEntry 1: " << endl
+                                            << "Post_MEM Queue: " << endl
+                                            << "\tEntry 0: " << endl << endl;
+
+                                ofs << "Registers: " << endl
+                                    << "R00:\t" 
                                     << registers[0] << "\t" 
                                     << registers[1] << "\t"
                                     << registers[2] << "\t"
@@ -640,7 +682,7 @@ int main(int argc, char* argv[])
                                     << registers[6] << "\t"
                                     << registers[7]
                                     << endl
-                                    << "r08:\t"
+                                    << "R08:\t"
                                     << registers[8]<< "\t" 
                                     << registers[9]<< "\t"
                                     << registers[10] << "\t"
@@ -650,7 +692,7 @@ int main(int argc, char* argv[])
                                     << registers[14] << "\t"
                                     << registers[15]
                                     << endl
-                                    << "r16:\t"
+                                    << "R16:\t"
                                     << registers[16] << "\t" 
                                     << registers[17] << "\t"
                                     << registers[18] << "\t"
@@ -660,7 +702,7 @@ int main(int argc, char* argv[])
                                     << registers[22] << "\t"
                                     << registers[23]
                                     << endl
-                                    << "r24:\t"
+                                    << "R24:\t"
                                     << registers[24] << "\t" 
                                     << registers[25] << "\t"
                                     << registers[26] << "\t"
@@ -670,13 +712,20 @@ int main(int argc, char* argv[])
                                     << registers[30] << "\t"
                                     << registers[31]
                                     << endl
-                                    << endl
-                                    << "data: " << endl;                         //Data value outputs
-                                //FIXME: reverse the output
+                                    << endl;
+                                
+                                ofs << "Cache" << endl;
+
+
+                                ofs << printCache(cache, 4) << endl;
+
+                                ofs << "Data: " << endl;                         //Data value outputs
+
+                                //FIXED: reverse the output
                                 int dataAddressIter = dataStartingAddress;      //DataAddressIter just tracks where every 8th dataValue address will fall, for printing purposes
                                 int dataIndexIter = dataValueIndex;             //DataIndexIter tracks which array entry will print.
                                 
-                                // for(int x = 0; x < numberOfDataEntries; x += 8){     //FIXME: the datavals are STORED in dataValues[] IN ORDER, but are PRINTED in REVERSE ORDER.
+                                // for(int x = 0; x < numberOfDataEntries; x += 8){     //FIXED: the datavals are STORED in dataValues[] IN ORDER, but are PRINTED in REVERSE ORDER.
                                 //         ofs << dataAddressIter << ": \t"
                                 //             << dataValues[dataIndexIter++] << "\t"
                                 //             << dataValues[dataIndexIter++] << "\t"
@@ -689,7 +738,7 @@ int main(int argc, char* argv[])
                                 //             dataAddressIter += 32;
                                 // }
 
-                                for(int x = 0; x < numberOfDataEntries; x += 8){     //FIXME: the datavals are STORED in dataValues[] IN ORDER, but are PRINTED in REVERSE ORDER.
+                                for(int x = 0; x < numberOfDataEntries; x += 8){     //FIXED: the datavals are STORED in dataValues[] IN ORDER, but are PRINTED in REVERSE ORDER.
                                         ofs << dataAddressIter << ": \t";
 
                                         dataIndexIter += 7;
@@ -710,11 +759,11 @@ int main(int argc, char* argv[])
                         }
                 }
                 else if(breakflag != 0){
-                        ofs << (commands[loopCounter]) //FIXME: Take this section out afterwards; it only appends the data section to end of simulation file
-                                << "\t" 
-                                <<  instructionAddresses[loopCounter] << " "
-                                << left << (int)commands[loopCounter].to_ulong() 
-                                << endl;
+                        //ofs << (commands[loopCounter]) //FIXED: Take this section out afterwards; it only appends the data section to end of simulation file
+                                //<< "\t" 
+                                //<<  instructionAddresses[loopCounter] << " "
+                                //<< left << (int)commands[loopCounter].to_ulong() 
+                                //<< endl;
                 }
                 /*QUESTION: Will using streams to output to file produce problems later? 
                                         Unsure about using strings due to earlier warnings, 
@@ -860,3 +909,19 @@ int convertImmToInt(string imm){        //Converts two's complement 16-bit strin
         return tempResult;
 
 }
+
+string printCache(cacheSet cache[], int numberOfSets){    //Here, numberOfSets would be 4, since there are cache entries 0-3
+        stringstream ss;
+        for(int i = 0; i < numberOfSets; i++){
+                ss << "Set " << i << ": LRU=" << cache[i].LRU << endl
+                     << "\t" << "Entry"
+                     << "0:[(" << cache[i].LRU << "," << cache[i].valid << "," << cache[i].dirty << ")" 
+                     << "<" << cache[i].block[0] << "," << cache[i].block[1] << ">]" << endl;
+                ss << "\t" << "Entry"
+                     << "1:[(" << cache[i + 1].LRU << "," << cache[i + 1].valid << "," << cache[i + 1].dirty << ")" 
+                     << "<" << cache[i + 1].block[0] << "," << cache[i + 1].block[1] << ">]" << endl;
+        }
+        return ss.str();
+}
+
+void printBuffers();
